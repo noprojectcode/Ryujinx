@@ -25,6 +25,49 @@ namespace ChocolArm64.Decoders
 
             FillBlock(memory, mode, block);
 
+            OpCode64 lastOp = block.GetLastOp();
+
+            if (IsBranch(lastOp) && !IsCall(lastOp) && lastOp is IOpCodeBImm op)
+            {
+                //It's possible that the branch on this block lands on the middle of the block.
+                //This is more common on tight loops. In this case, we can improve the codegen
+                //a bit by changing the CFG and either making the branch point to the same block
+                //(which indicates that the block is a loop that jumps back to the start), and the
+                //other possible case is a jump somewhere on the middle of the block, which is
+                //also a loop, but in this case we need to split the block in half.
+                if (op.Imm == start)
+                {
+                    block.Branch = block;
+                }
+                else if ((ulong)op.Imm > (ulong)start &&
+                         (ulong)op.Imm < (ulong)block.EndPosition)
+                {
+                    Block botBlock = new Block(op.Imm);
+
+                    int botBlockIndex = 0;
+
+                    long currPosition = start;
+
+                    while ((ulong)currPosition < (ulong)op.Imm)
+                    {
+                        currPosition += block.OpCodes[botBlockIndex++].OpCodeSizeInBytes;
+                    }
+
+                    botBlock.OpCodes.AddRange(block.OpCodes);
+
+                    botBlock.OpCodes.RemoveRange(0, botBlockIndex);
+
+                    block.OpCodes.RemoveRange(botBlockIndex, block.OpCodes.Count - botBlockIndex);
+
+                    botBlock.EndPosition = block.EndPosition;
+
+                    block.EndPosition = op.Imm;
+
+                    botBlock.Branch = botBlock;
+                    block.Next      = botBlock;
+                }
+            }
+
             return block;
         }
 
@@ -65,8 +108,7 @@ namespace ChocolArm64.Decoders
                 {
                     OpCode64 lastOp = current.GetLastOp();
 
-                    bool isCall = lastOp.Emitter == InstEmit.Bl ||
-                                  lastOp.Emitter == InstEmit.Blr;
+                    bool isCall = IsCall(lastOp);
 
                     if (lastOp is IOpCodeBImm op && !isCall)
                     {
@@ -161,6 +203,13 @@ namespace ChocolArm64.Decoders
             return  opCode is IOpCodeBImm32 ||
                     opCode is IOpCodeBReg32 ||
                    (opCode is IOpCodeAlu32 op && op.Rd == RegisterAlias.Aarch32Pc);
+        }
+
+        private static bool IsCall(OpCode64 opCode)
+        {
+            //TODO (CQ): ARM32 support.
+            return opCode.Emitter == InstEmit.Bl ||
+                   opCode.Emitter == InstEmit.Blr;
         }
 
         private static bool IsException(OpCode64 opCode)
